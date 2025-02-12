@@ -1,0 +1,10 @@
+services:
+  localstack-mvp:
+    image: localstack/localstack:latest
+    container_name: localstack-mvp
+    environment:
+      - SERVICES=ssm,s3
+    ports:
+      - 4566:4566
+    volumes:
+      - './localstack:/var/lib/localstack'

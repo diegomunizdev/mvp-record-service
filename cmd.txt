@@ -1,0 +1,11 @@
+aws --endpoint-url=http://localhost:4566 s3 mb s3://meu-bucket
+aws --endpoint-url=http://localhost:4566 s3 ls
+
+aws --endpoint-url=http://localhost:4566 ssm put-parameter \
+    --name "TESTANDO" \
+    --value "TESTANDO" \
+    --type "SecureString"
+
+aws --endpoint-url=http://localhost:4566 ssm get-parameters-by-path --path "/app/"
+
+aws --endpoint-url=http://localhost:4566 ssm get-parameter --name "/app/secret-key" --with-decryption
