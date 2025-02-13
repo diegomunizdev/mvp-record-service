@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -8,7 +7,13 @@ import {
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { Server } from 'socket.io';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+} from '@aws-sdk/client-s3';
 
 @WebSocketGateway(3002, {
   cors: {
@@ -19,6 +24,12 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
 
   private s3: S3Client;
+  private uploadId: string | null = null;
+  private parts: { PartNumber: number; ETag: string }[] = [];
+  private partNumber = 1;
+  private chunks: Buffer[] = [];
+  private isMultipart = false;
+  private fileKey = `stream/${Date.now()}.webm`;
 
   constructor() {
     this.s3 = new S3Client({
@@ -41,28 +52,79 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
     console.log('Cliente desconectado');
   }
 
+  async startMultipartUpload() {
+    const command = new CreateMultipartUploadCommand({
+      Bucket: 'mvp-record',
+      Key: this.fileKey,
+      ContentType: 'video/webm',
+    });
+    const response = await this.s3.send(command);
+    this.uploadId = response.UploadId || null;
+  }
+
+  async uploadPart(chunk: Buffer) {
+    if (!this.uploadId) await this.startMultipartUpload();
+    const command = new UploadPartCommand({
+      Bucket: 'mvp-record',
+      Key: this.fileKey,
+      UploadId: this.uploadId!,
+      PartNumber: this.partNumber,
+      Body: chunk,
+    });
+    const response = await this.s3.send(command);
+    this.parts.push({ PartNumber: this.partNumber, ETag: response.ETag! });
+    this.partNumber++;
+  }
+
+  async completeUpload() {
+    if (this.isMultipart && this.uploadId) {
+      const command = new CompleteMultipartUploadCommand({
+        Bucket: 'mvp-record',
+        Key: this.fileKey,
+        UploadId: this.uploadId,
+        MultipartUpload: { Parts: this.parts },
+      });
+      await this.s3.send(command);
+      console.log('Multipart upload finalizado!');
+    } else {
+      const finalBuffer = Buffer.concat(this.chunks);
+      const command = new PutObjectCommand({
+        Bucket: 'mvp-record',
+        Key: this.fileKey,
+        Body: finalBuffer,
+        ContentType: 'video/webm',
+      });
+      await this.s3.send(command);
+      console.log('Upload finalizado!');
+    }
+    this.resetUploadState();
+  }
+
+  resetUploadState() {
+    this.uploadId = null;
+    this.parts = [];
+    this.partNumber = 1;
+    this.chunks = [];
+    this.isMultipart = false;
+  }
+
   @SubscribeMessage('message')
   async handleUploadVideo(@MessageBody() data: Buffer) {
-    try {
-      // Converte o vídeo (blob) para um stream legível
-      // Configuração do S3 para upload do vídeo
-      const params = {
-        Bucket: 'mvp-record',
-        Key: `stream/${Date.now()}.webm`, // Nome do arquivo no S3
-        Body: data,
-        ContentType: 'video/webm',
-      };
-
-      // Realiza o upload do vídeo para o S3
-      const command = new PutObjectCommand(params);
-      const saved = await this.s3.send(command);
-
-      console.log('Upload bem-sucedido', saved);
-      // Envia uma confirmação de sucesso para o cliente
-      return { message: 'Upload bem-sucedido!' };
-    } catch (error) {
-      console.error('Erro no upload:', error);
-      return { message: 'Erro no upload', error };
+    const values = Object.values(data);
+    const uint8Array = new Uint8Array(values);
+    const buffer = Buffer.from(uint8Array);
+    if (buffer.length > 5 * 1024 * 1024) {
+      this.isMultipart = true;
+      await this.uploadPart(buffer);
+    } else {
+      this.chunks.push(buffer);
+      console.log('Salvando chunks...');
     }
+  }
+
+  @SubscribeMessage('end')
+  async handleEnd() {
+    console.log('finalizado.');
+    await this.completeUpload();
   }
 }
