@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import {
   WebSocketGateway,
   WebSocketServer,
@@ -10,20 +10,17 @@ import {
 import { Server, Socket } from 'socket.io';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { v4 as uuidv4 } from 'uuid';
+import { Readable } from 'stream';
 
-@Injectable()
 @WebSocketGateway(3002, {
   cors: {
     origin: '*', // Permite qualquer origem (ajuste conforme necessário)
-    methods: ['GET', 'POST'],
   },
 })
 export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
 
-  private readonly logger = new Logger(UploadGateway.name);
   private s3: S3Client;
-  private clients = new Map<string, Buffer[]>(); // Armazena buffers temporários por cliente
 
   constructor() {
     this.s3 = new S3Client({
@@ -35,53 +32,41 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
       },
     });
   }
-
-  handleConnection(client: Socket) {
-    this.clients.set(client.id, []);
-    this.logger.log(`Client connected: ${client.id}`);
+  // Quando um cliente se conecta
+  handleConnection(client: any) {
+    console.log('Cliente conectado', client.id);
   }
 
-  handleDisconnect(client: Socket) {
-    this.clients.delete(client.id);
-    this.logger.log(`Client disconnected: ${client.id}`);
+  // Quando um cliente se desconecta
+  handleDisconnect(client: any) {
+    console.log('Cliente desconectado', client.id);
   }
 
   @SubscribeMessage('upload')
-  handleUpload(@MessageBody() data: Buffer, client: Socket) {
-    if (this.clients.has(client.id)) {
-      this.clients.get(client.id)?.push(data);
-    }
-  }
-
-  @SubscribeMessage('ping')
-  handlePing(client: Socket) {
-    client.emit('pong', { message: 'pong' });
-  }
-
-  @SubscribeMessage('stop')
-  async handleStop(client: Socket) {
-    if (!this.clients.has(client.id)) return;
-
-    const finalBuffer = Buffer.concat(this.clients.get(client.id) || []);
-    const fileName = `recordings/${uuidv4()}.webm`;
-
+  async handleUploadVideo(@MessageBody() videoBlob: any) {
     try {
-      await this.s3.send(
-        new PutObjectCommand({
-          Bucket: 'mvp-record',
-          Key: fileName,
-          Body: finalBuffer,
-          ContentType: 'video/webm',
-        }),
-      );
+      // Converte o vídeo (blob) para um stream legível
+      const videoStream = Readable.from(videoBlob);
 
-      this.logger.log(`File uploaded to S3: ${fileName}`);
-      client.emit('uploadComplete', { success: true, fileName });
+      // Configuração do S3 para upload do vídeo
+      const params = {
+        Bucket: 'your-bucket-name',
+        Key: `videos/${Date.now()}.webm`, // Nome do arquivo no S3
+        Body: videoStream,
+        ContentType: 'video/webm',
+      };
+
+      // Realiza o upload do vídeo para o S3
+      const command = new PutObjectCommand(params);
+      const data = await this.s3.send(command);
+
+      console.log('Upload bem-sucedido', data);
+
+      // Envia uma confirmação de sucesso para o cliente
+      return { message: 'Upload bem-sucedido!' };
     } catch (error) {
-      this.logger.error(`Error uploading file: ${error.message}`);
-      client.emit('uploadComplete', { success: false, error: error.message });
+      console.error('Erro no upload:', error);
+      return { message: 'Erro no upload' };
     }
-
-    this.clients.delete(client.id);
   }
 }

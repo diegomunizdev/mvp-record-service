@@ -9,5 +9,6 @@ import { UploadGateway } from './services/websocket/upload.service';
   imports: [ConfigModule.forRoot(), AWSModule],
   controllers: [AppController],
   providers: [AppService, UploadGateway],
+  exports: [UploadGateway],
 })
 export class AppModule {}
