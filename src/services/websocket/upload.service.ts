@@ -85,7 +85,7 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
         MultipartUpload: { Parts: this.parts },
       });
       await this.s3.send(command);
-      console.log('Multipart upload finalizado!');
+      console.log('UPLOAD MULTIPART CONCLUÍDO COM SUCESSO!');
     } else {
       const finalBuffer = Buffer.concat(this.chunks);
       const command = new PutObjectCommand({
@@ -95,7 +95,7 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
         ContentType: 'video/webm',
       });
       await this.s3.send(command);
-      console.log('Upload finalizado!');
+      console.log('UPLOAD CONCLUÍDO COM SUCESSO!');
     }
     this.resetUploadState();
   }
@@ -118,13 +118,13 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
       await this.uploadPart(buffer);
     } else {
       this.chunks.push(buffer);
-      console.log('Salvando chunks...');
+      console.log('Salvando chunks:', this.chunks?.length);
     }
   }
 
   @SubscribeMessage('end')
   async handleEnd() {
-    console.log('finalizado.');
+    console.log('# GRAVAÇÃO FINALIZADA.');
     await this.completeUpload();
   }
 }
