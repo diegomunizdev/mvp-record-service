@@ -5,8 +5,9 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  ConnectedSocket,
 } from '@nestjs/websockets';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
 import {
   S3Client,
   PutObjectCommand,
@@ -20,6 +21,7 @@ import {
   QueryCommand,
 } from '@aws-sdk/client-dynamodb';
 import { v4 as uuidV4 } from 'uuid';
+import { CloudWatchLogsService } from '../aws/Cloudwatch.service';
 
 @WebSocketGateway(3002, {
   cors: {
@@ -34,10 +36,9 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private uploadId: string | null = null;
   private parts: { PartNumber: number; ETag: string }[] = [];
   private partNumber = 1;
-  private chunks: Buffer[] = [];
   private isMultipart = false;
 
-  constructor() {
+  constructor(private readonly cloudwatchLog: CloudWatchLogsService) {
     this.s3 = new S3Client({
       endpoint: 'http://127.0.0.1:4566',
       region: 'sa-east-1',
@@ -57,14 +58,19 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
       },
     });
   }
+
   // Quando um cliente se conecta
-  handleConnection(client: any) {
-    console.log('Cliente conectado');
+  async handleConnection(@ConnectedSocket() client: Socket) {
+    await this.cloudwatchLog.logUpload({
+      message: `CLIENT CONNECT: ${client.id}`,
+    });
   }
 
   // Quando um cliente se desconecta
-  handleDisconnect(client: any) {
-    console.log('Cliente desconectado');
+  async handleDisconnect(@ConnectedSocket() client: Socket) {
+    await this.cloudwatchLog.logUpload({
+      message: `CLIENT DISCONNECT: ${client.id}`,
+    });
   }
 
   async startMultipartUpload(fileKey) {
@@ -92,44 +98,52 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   async completeUpload(fileKey: string) {
-    if (this.isMultipart && this.uploadId) {
-      const command = new CompleteMultipartUploadCommand({
-        Bucket: 'mvp-record',
-        Key: `stream/${fileKey}.webm`,
-        UploadId: this.uploadId,
-        MultipartUpload: { Parts: this.parts },
-      });
-      await this.s3.send(command);
-      console.log('UPLOAD MULTIPART CONCLUÍDO COM SUCESSO!');
-    } else {
-      const results = await this.dynamodb.send(
-        new QueryCommand({
-          TableName: 'video_chunk',
-          KeyConditionExpression: 'streamId = :s',
-          ExpressionAttributeValues: {
-            ':s': { S: fileKey },
-          },
-          ProjectionExpression: 'chunkData, createdAt',
-        }),
-      );
+    try {
+      if (this.isMultipart && this.uploadId) {
+        const command = new CompleteMultipartUploadCommand({
+          Bucket: 'mvp-record',
+          Key: `stream/${fileKey}.webm`,
+          UploadId: this.uploadId,
+          MultipartUpload: { Parts: this.parts },
+        });
+        await this.s3.send(command);
+      } else {
+        const results = await this.dynamodb.send(
+          new QueryCommand({
+            TableName: 'video_chunk',
+            KeyConditionExpression: 'streamId = :s',
+            ExpressionAttributeValues: {
+              ':s': { S: fileKey },
+            },
+            ProjectionExpression: 'chunkData, createdAt',
+          }),
+        );
 
-      const finalBuffer = Buffer.concat(
-        results.Items.sort(
-          (a, b) =>
-            new Date(a.createdAt.S).getTime() -
-            new Date(b.createdAt.S).getTime(),
-        ).map((i) => Buffer.from(i.chunkData.B)),
-      );
+        const finalBuffer = Buffer.concat(
+          results.Items.sort(
+            (a, b) =>
+              new Date(a.createdAt.S).getTime() -
+              new Date(b.createdAt.S).getTime(),
+          ).map((i) => Buffer.from(i.chunkData.B)),
+        );
 
-      const command = new PutObjectCommand({
-        Bucket: 'mvp-record',
-        Key: `stream/${fileKey}.webm`,
-        Body: finalBuffer,
-        ContentType: 'video/webm',
+        const command = new PutObjectCommand({
+          Bucket: 'mvp-record',
+          Key: `stream/${fileKey}.webm`,
+          Body: finalBuffer,
+          ContentType: 'video/webm',
+        });
+        await this.s3.send(command);
+      }
+      await this.cloudwatchLog.logUpload({
+        message: `upload completed successfully: stream/${fileKey}.webm`,
       });
-      await this.s3.send(command);
-      console.log('UPLOAD CONCLUÍDO COM SUCESSO!');
+    } catch (error) {
+      await this.cloudwatchLog.logUpload({
+        message: `Upload error: ${error}`,
+      });
     }
+
     this.resetUploadState();
   }
 
@@ -137,7 +151,6 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.uploadId = null;
     this.parts = [];
     this.partNumber = 1;
-    this.chunks = [];
     this.isMultipart = false;
   }
 
@@ -148,11 +161,11 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const values = Object.values(data.buffer);
     const uint8Array = new Uint8Array(values);
     const buffer = Buffer.from(uint8Array);
-    if (buffer.length > 5 * 1024 * 1024) {
-      this.isMultipart = true;
-      await this.uploadPart(data.streamId.toString(), buffer);
-    } else {
-      try {
+    try {
+      if (buffer.length > 5 * 1024 * 1024) {
+        this.isMultipart = true;
+        await this.uploadPart(data.streamId.toString(), buffer);
+      } else {
         const id = uuidV4();
         const params = {
           TableName: 'video_chunk',
@@ -164,10 +177,14 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
           },
         };
         await this.dynamodb.send(new PutItemCommand(params));
-        console.log('Salvando chunks');
-      } catch (err) {
-        console.log(err);
+        await this.cloudwatchLog.logUpload({
+          message: `Saving stream chunks: ${data.streamId}`,
+        });
       }
+    } catch (err) {
+      await this.cloudwatchLog.logUpload({
+        message: `Error saving stream chunks: ${err}`,
+      });
     }
   }
 
@@ -178,7 +195,9 @@ export class UploadGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       await this.completeUpload(data.streamId.toString());
     } catch (error) {
-      console.log('ERROR:', error);
+      await this.cloudwatchLog.logUpload({
+        message: `Error saving video to bucket: ${error}`,
+      });
     }
   }
 }

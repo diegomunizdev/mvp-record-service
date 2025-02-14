@@ -3,7 +3,7 @@ services:
     image: localstack/localstack:latest
     container_name: localstack-mvp
     environment:
-      - SERVICES=ssm,s3,dynamodb
+      - SERVICES=ssm,s3,dynamodb,cloudwatch,logs
     ports:
       - 4566:4566
     volumes:
